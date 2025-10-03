@@ -3,5 +3,7 @@ bin/
 .classpath
 .settings/
 .project
-output
+output/
+*.iml
+.idea/
 
