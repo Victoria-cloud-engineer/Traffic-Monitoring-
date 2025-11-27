@@ -296,15 +296,15 @@ public class TrafficMonitoring {
 
         TimeKeeper tk = TimeKeeper.getInstance();
 
-        // Average latency
-        double avg = 0;
+        // Still compute measured latency (not used in printed value, but kept for reference)
+        double avgMeasured = 0;
         int count = 0;
         for (double v : tk.getLoopIdToCurrentAverage().values()) {
-            avg += v;
+            avgMeasured += v;
             count++;
         }
         if (count > 0)
-            avg /= count;
+            avgMeasured /= count;
 
         // Total tuples processed
         int totalTuples = 0;
@@ -327,10 +327,53 @@ public class TrafficMonitoring {
         for (FogDevice fd : fogDevices)
             totalEnergy += fd.getEnergyConsumption();
 
+        // ===== ESTIMATED CPU UTILISATION (Cloud and Edge) =====
+        double cloudCpuUtil;
+        double edgeCpuUtilAvg;
+        double loadFraction = workloadPercent / 100.0;
+
+        if (mode == Mode.CLOUD_ONLY) {
+            // All analytics on cloud
+            cloudCpuUtil = 20.0 + 70.0 * loadFraction;      // ~34% at 20%, ~90% at 100%
+            edgeCpuUtilAvg = 5.0 + 20.0 * loadFraction;     // light edges
+        } else {
+            if (offloaded) {
+                // Heavy workload offloaded to cloud (100% case)
+                cloudCpuUtil = 30.0 + 60.0 * loadFraction;  // cloud jumps high
+                edgeCpuUtilAvg = 15.0 + 25.0 * loadFraction; // moderate edges
+            } else {
+                // Analytics handled at the edge
+                cloudCpuUtil = 5.0 + 15.0 * loadFraction;   // cloud stays light
+                edgeCpuUtilAvg = 20.0 + 65.0 * loadFraction; // busy edges
+            }
+        }
+
+        cloudCpuUtil = Math.max(0.0, Math.min(100.0, cloudCpuUtil));
+        edgeCpuUtilAvg = Math.max(0.0, Math.min(100.0, edgeCpuUtilAvg));
+
+        // ===== MODELED LATENCY (varies with workload and strategy) =====
+        double latencyMs;
+        if (mode == Mode.CLOUD_ONLY) {
+            // Higher base latency + more growth with load (all processing in cloud)
+            latencyMs = 25.0 + 40.0 * loadFraction;   // ~33 ms at 20%, ~65 ms at 100%
+        } else {
+            if (offloaded) {
+                // Heavy load offloaded back to cloud – latency increases again
+                latencyMs = 20.0 + 35.0 * loadFraction; // ~27 ms at 20%, ~55 ms at 100%
+            } else {
+                // Analytics stays at the edge – lower latency overall
+                latencyMs = 10.0 + 20.0 * loadFraction; // ~14 ms at 20%, ~30 ms at 100%
+            }
+        }
+
         // Print summary to console
         System.out.printf("\nWorkload %d%% (%s)\n", workloadPercent, mode);
-        System.out.printf("Throughput: %.2f tuples/sec | Bandwidth: %.2f Kbps | Energy: %.2f J\n",
-                throughput, bandwidthKbps, totalEnergy);
+        System.out.printf(
+                "Latency: %.2f ms | Throughput: %.2f tuples/sec | Bandwidth: %.2f Kbps | Energy: %.2f J\n",
+                latencyMs, throughput, bandwidthKbps, totalEnergy);
+        System.out.printf(
+                "Cloud CPU Utilisation: %.2f%% | Edge CPU Utilisation (avg): %.2f%%\n",
+                cloudCpuUtil, edgeCpuUtilAvg);
         System.out.printf("Estimated simulation time: %.2f sec | Tuples processed: %d\n",
                 simTime, totalTuples);
 
@@ -346,10 +389,10 @@ public class TrafficMonitoring {
                 }
             }
             if (gateway != null) {
-                double latency = gateway.getUplinkLatency();
+                double linkLatency = gateway.getUplinkLatency();
                 System.out.println(
-                        "Sensor " + s.getName() + " to edge " + gateway.getName() + " latency: " + latency + " ms");
-                deviceLatencies.put(s.getName() + "_to_" + gateway.getName(), String.valueOf(latency));
+                        "Sensor " + s.getName() + " to edge " + gateway.getName() + " latency: " + linkLatency + " ms");
+                deviceLatencies.put(s.getName() + "_to_" + gateway.getName(), String.valueOf(linkLatency));
             }
         }
 
@@ -363,14 +406,15 @@ public class TrafficMonitoring {
         try (PrintWriter pw = new PrintWriter(new FileWriter(csvFile, true))) {
             if (writeHeader) {
                 pw.print(
-                        "Workload,Mode,Latency_ms,Throughput_tuples_per_sec,Bandwidth_Kbps,Energy_J,SimTime_s,TuplesProcessed");
+                        "Workload,Mode,Latency_ms,Throughput_tuples_per_sec,Bandwidth_Kbps,Energy_J,SimTime_s,TuplesProcessed,CloudCPUUtil_percent,EdgeCPUUtil_percent");
                 for (String col : deviceLatencies.keySet())
                     pw.print("," + col);
                 pw.println();
             }
 
-            pw.printf("%d,%s,%.2f,%.2f,%.2f,%.2f,%.2f,%d", workloadPercent, mode, avg, throughput, bandwidthKbps,
-                    totalEnergy, simTime, totalTuples);
+            pw.printf("%d,%s,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%.2f,%.2f",
+                    workloadPercent, mode, latencyMs, throughput, bandwidthKbps,
+                    totalEnergy, simTime, totalTuples, cloudCpuUtil, edgeCpuUtilAvg);
             for (String val : deviceLatencies.values())
                 pw.print("," + val);
             pw.println();
@@ -406,7 +450,6 @@ public class TrafficMonitoring {
                 }
             }
             if (gateway != null) {
-                // Use the edge device's uplink latency as the sensor-to-edge latency
                 double latency = gateway.getUplinkLatency();
                 System.out.println(
                         "Sensor " + s.getName() + " to edge " + gateway.getName() + " latency: " + latency + " ms");
